@@ -18,6 +18,13 @@ import {
 export const properties: INodeProperties[] = [
 	...returnAllOrLimit,
 	{
+		displayName: 'Get Raw Content',
+		name: 'getRawContent',
+		type: 'boolean',
+		default: false,
+		description: 'Whether to include the raw MIME content of each email. Note: This will make the operation slower as it requires an additional API call per message.',
+	}
+	{,
 		displayName: 'Output',
 		name: 'output',
 		type: 'options',
@@ -307,6 +314,29 @@ export async function execute(this: IExecuteFunctions, index: number) {
 			this.helpers.returnJsonArray(responseData as IDataObject[]),
 			{ itemData: { item: index } },
 		);
+	}
+
+	// AJOUT: Récupération du contenu raw pour chaque message si demandé
+	if (options.getRawContent) {
+		for (let i = 0; i < executionData.length; i++) {
+			const messageId = executionData[i].json.id as string;
+			try {
+				const rawContent = await microsoftApiRequest.call(
+					this,
+					'GET',
+					`/messages/${messageId}/$value`,
+					undefined,
+					{},
+					undefined,
+					{},
+					{ encoding: null, resolveWithFullResponse: true },
+				);
+				executionData[i].json.raw = (rawContent.body as string);
+			} catch (error) {
+				// Si l'erreur survient pour un message, on continue avec les autres
+				executionData[i].json.raw = `Error fetching raw content: ${error.message}`;
+			}
+		}
 	}
 
 	return executionData;

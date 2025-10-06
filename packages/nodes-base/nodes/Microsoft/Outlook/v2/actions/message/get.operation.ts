@@ -95,6 +95,13 @@ export const properties: INodeProperties[] = [
 								default: '',
 								description: 'Optional name of the output file, if not set message ID is used',
 							},
+                            {
+							displayName: 'Get Raw Content',
+							name: 'getRawContent',
+							type: 'boolean',
+							default: false,
+							description: 'Whether to include the raw MIME content of the email',
+							}
 						],
 					},
 				],
@@ -160,6 +167,22 @@ export async function execute(this: IExecuteFunctions, index: number) {
 			this.helpers.returnJsonArray(responseData as IDataObject),
 			{ itemData: { item: index } },
 		);
+	}
+
+	// AJOUT: Récupération du contenu MIME raw si demandé
+	if (options.getRawContent) {
+		const rawContent = await microsoftApiRequest.call(
+			this,
+			'GET',
+			`/messages/${messageId}/$value`,
+			undefined,
+			{},
+			undefined,
+			{},
+			{ encoding: null, resolveWithFullResponse: true },
+		);
+
+		executionData[0].json.raw = (rawContent.body as string);
 	}
 
 	if (options.getMimeContent) {
