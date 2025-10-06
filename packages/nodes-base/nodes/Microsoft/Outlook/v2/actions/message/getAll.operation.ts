@@ -18,13 +18,6 @@ import {
 export const properties: INodeProperties[] = [
 	...returnAllOrLimit,
 	{
-		displayName: 'Get Raw Content',
-		name: 'getRawContent',
-		type: 'boolean',
-		default: false,
-		description: 'Whether to include the raw MIME content of each email. Note: This will make the operation slower as it requires an additional API call per message.',
-	}
-	{,
 		displayName: 'Output',
 		name: 'output',
 		type: 'options',
@@ -233,6 +226,13 @@ export const properties: INodeProperties[] = [
 				default: false,
 				description:
 					"Whether the message's attachments will be downloaded and included in the output",
+			},
+			{
+				displayName: 'Get Raw Content',
+				name: 'getRawContent',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to include the raw MIME content of each email. Note: This will make the operation slower as it requires an additional API call per message.',
 			},
 		],
 	},
