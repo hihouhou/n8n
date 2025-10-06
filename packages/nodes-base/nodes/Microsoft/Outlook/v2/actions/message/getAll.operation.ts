@@ -331,7 +331,18 @@ export async function execute(this: IExecuteFunctions, index: number) {
 					{},
 					{ encoding: null, resolveWithFullResponse: true },
 				);
-				executionData[i].json.raw = (rawContent.body as string);
+
+				// Convertir le Buffer en string
+				let rawString: string;
+				if (Buffer.isBuffer(rawContent.body)) {
+					rawString = rawContent.body.toString('utf8');
+				} else if (typeof rawContent.body === 'string') {
+					rawString = rawContent.body;
+				} else {
+					rawString = Buffer.from(rawContent.body as any).toString('utf8');
+				}
+
+				executionData[i].json.raw = rawString;
 			} catch (error) {
 				// Si l'erreur survient pour un message, on continue avec les autres
 				executionData[i].json.raw = `Error fetching raw content: ${error.message}`;

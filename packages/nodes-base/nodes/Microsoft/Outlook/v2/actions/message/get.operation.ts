@@ -95,16 +95,16 @@ export const properties: INodeProperties[] = [
 								default: '',
 								description: 'Optional name of the output file, if not set message ID is used',
 							},
-                            {
-							displayName: 'Get Raw Content',
-							name: 'getRawContent',
-							type: 'boolean',
-							default: false,
-							description: 'Whether to include the raw MIME content of the email',
-							}
 						],
 					},
 				],
+			},
+			{
+				displayName: 'Get Raw Content',
+				name: 'getRawContent',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to include the raw MIME content of the email in the JSON output',
 			},
 		],
 	},
@@ -182,7 +182,17 @@ export async function execute(this: IExecuteFunctions, index: number) {
 			{ encoding: null, resolveWithFullResponse: true },
 		);
 
-		executionData[0].json.raw = (rawContent.body as string);
+		// Convertir le Buffer en string
+		let rawString: string;
+		if (Buffer.isBuffer(rawContent.body)) {
+			rawString = rawContent.body.toString('utf8');
+		} else if (typeof rawContent.body === 'string') {
+			rawString = rawContent.body;
+		} else {
+			rawString = Buffer.from(rawContent.body as any).toString('utf8');
+		}
+
+		executionData[0].json.raw = rawString;
 	}
 
 	if (options.getMimeContent) {
