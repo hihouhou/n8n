@@ -240,7 +240,7 @@ export function prepareFilterString(filters: IDataObject) {
 			.map((folder) => `parentFolderId eq '${folder}'`)
 			.join(' or ');
 
-		filterString.push(folders);
+		filterString.push(`(${folders})`);
 	}
 
 	if (selectedFilters.foldersToExclude) {
