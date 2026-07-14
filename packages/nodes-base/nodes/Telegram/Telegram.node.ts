@@ -23,13 +23,15 @@ import {
 	createSendAndWaitMessageBody,
 	getPropertyName,
 } from './GenericFunctions';
+import { telegramHitlProperties } from './hitl/descriptions';
+import { prepareChatApproval } from './hitl/setup';
+import { telegramSendAndWaitWebhook } from './hitl/webhook';
 import { appendAttributionOption } from '../../utils/descriptions';
 import { configureWaitTillDate } from '../../utils/sendAndWait/configureWaitTillDate.util';
 import { sendAndWaitWebhooksDescription } from '../../utils/sendAndWait/descriptions';
 import {
 	getSendAndWaitProperties,
 	SEND_AND_WAIT_WAITING_TOOLTIP,
-	sendAndWaitWebhook,
 } from '../../utils/sendAndWait/utils';
 
 export class Telegram implements INodeType {
@@ -2362,7 +2364,7 @@ export class Telegram implements INodeType {
 					},
 				],
 				'message',
-				undefined,
+				telegramHitlProperties,
 				{
 					noButtonStyle: true,
 					defaultApproveLabel: '✅ Approve',
@@ -2372,7 +2374,7 @@ export class Telegram implements INodeType {
 		],
 	};
 
-	webhook = sendAndWaitWebhook;
+	webhook = telegramSendAndWaitWebhook;
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
@@ -2394,7 +2396,8 @@ export class Telegram implements INodeType {
 		const instanceId = this.getInstanceId();
 
 		if (resource === 'message' && operation === SEND_AND_WAIT_OPERATION) {
-			body = createSendAndWaitMessageBody(this);
+			const chatApproval = await prepareChatApproval(this);
+			body = createSendAndWaitMessageBody(this, chatApproval);
 
 			try {
 				await apiRequest.call(this, 'POST', 'sendMessage', body);
