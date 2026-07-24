@@ -107,6 +107,7 @@ export async function getPollResponse(
 						this,
 						'GET',
 						`/messages/${messageId}/$value`,
+						0,
 						undefined,
 						{},
 						undefined,

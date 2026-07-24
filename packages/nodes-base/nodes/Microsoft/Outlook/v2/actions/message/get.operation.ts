@@ -181,6 +181,7 @@ export async function execute(this: IExecuteFunctions, index: number) {
 			this,
 			'GET',
 			`/messages/${messageId}/$value`,
+			index,
 			undefined,
 			{},
 			undefined,
