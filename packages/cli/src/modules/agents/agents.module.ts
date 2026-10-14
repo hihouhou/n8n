@@ -11,6 +11,13 @@ export class AgentsModule implements ModuleInterface {
 		const { SandboxSettingsService } = await import('@/services/sandbox-settings.service.js');
 		Container.get(SandboxSettingsService).registerCredentialUses();
 
+		// Read the skills hub flag once, before anything reads or writes agent skills. With
+		// the flag on, each main copies inline agent skills into the hub before agents run.
+		const { SkillsHubRollout } = await import('./skills/skills-hub-rollout.js');
+		await Container.get(SkillsHubRollout).init();
+		const { SkillsHubStartupCopy } = await import('./skills/skills-hub-startup-copy.js');
+		await Container.get(SkillsHubStartupCopy).runOnStartup();
+
 		// Imported for its `@OnLifecycleEvent` registration, which happens at
 		// class-decoration time — nothing else references this service.
 		await import('./agent-workflow-tool-resume.service.js');
@@ -28,6 +35,7 @@ export class AgentsModule implements ModuleInterface {
 		await import('./agent-integrations.controller.js');
 		await import('./agent-slack-integrations.controller.js');
 		await import('./agent-teams-integrations.controller.js');
+		await import('./agent-whatsapp-integrations.controller.js');
 		await import('./agent-vector-stores.controller.js');
 		await import('./agent-tasks.controller.js');
 		await import('./agent-sandbox.controller.js');
@@ -94,7 +102,7 @@ export class AgentsModule implements ModuleInterface {
 		const { LinearIntegration } = await import('./integrations/platforms/linear-integration.js');
 		const { DiscordIntegration } = await import('./integrations/platforms/discord-integration.js');
 		const { WhatsAppIntegration } = await import(
-			'./integrations/platforms/whatsapp-integration.js'
+			'./integrations/platforms/whatsapp/whatsapp-integration.js'
 		);
 		const { TeamsIntegration } = await import(
 			'./integrations/platforms/teams/teams-integration.js'
@@ -206,7 +214,14 @@ export class AgentsModule implements ModuleInterface {
 		const { AgentInterruptedExecutionSweepTask } = await import(
 			'./agent-interrupted-execution-sweep.task.js'
 		);
-		return [AgentCheckpointPruningTask, AgentInterruptedExecutionSweepTask];
+		const { AgentChannelMediaRetentionTask } = await import(
+			'./agent-channel-media-retention.task.js'
+		);
+		return [
+			AgentCheckpointPruningTask,
+			AgentInterruptedExecutionSweepTask,
+			AgentChannelMediaRetentionTask,
+		];
 	}
 
 	async settings() {
@@ -214,6 +229,7 @@ export class AgentsModule implements ModuleInterface {
 		const { AgentsSettingsService } = await import('./agents-settings.service.js');
 		const { AiService } = await import('@/services/ai.service.js');
 		const { SandboxSettingsService } = await import('@/services/sandbox-settings.service.js');
+		const { SkillsHubRollout } = await import('./skills/skills-hub-rollout.js');
 		const aiService = Container.get(AiService);
 		const proxyEnabled = aiService.isProxyEnabled();
 		return {
@@ -221,6 +237,7 @@ export class AgentsModule implements ModuleInterface {
 			modules: [...config.modules],
 			knowledgeBaseEnabled: Container.get(SandboxSettingsService).isAgentSandboxEnabled(),
 			proxyEnabled,
+			skillsHubEnabled: Container.get(SkillsHubRollout).isEnabled,
 		};
 	}
 
