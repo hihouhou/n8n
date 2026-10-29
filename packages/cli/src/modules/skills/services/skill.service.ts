@@ -1,5 +1,4 @@
 import {
-	AGENT_SKILL_NAME_MAX_LENGTH,
 	hasSkillInstructions,
 	SKILL_INSTRUCTIONS_REQUIRED_MESSAGE,
 	skillNameKey,
@@ -30,15 +29,18 @@ import { generateNanoId } from '@n8n/utils/generate-nano-id';
 
 import type { SkillFrontmatter, SkillVersion } from '../database/entities/skill-version.entity';
 import type { Skill, SkillSource } from '../database/entities/skill.entity';
+import { SkillSourceRepository } from '../database/repositories/skill-source.repository';
 import {
 	SkillRepository,
 	type SkillListSort,
 	type SkillVisibility,
 } from '../database/repositories/skill.repository';
 import { SkillNameTakenError } from '../errors/skill-name-taken.error';
+import { SkillSyncedError } from '../errors/skill-synced.error';
 import {
 	isSameSkillTarget,
 	skillScopeOf,
+	syncedSourceLabel,
 	toAgentSkill,
 	toLatestSkill,
 	toSkillContent,
@@ -57,6 +59,17 @@ import { getSkillHash } from '../utils/skill-hash';
 import { AssistantSkillsFlagGate } from './assistant-skills-flag-gate';
 import { SkillAccessService } from './skill-access.service';
 import { SkillRuntimeService } from './skill-runtime.service';
+import { SkillSyncFlagGate } from './skill-sync-flag-gate';
+import { SkillSyncedFromService } from './skill-synced-from.service';
+import {
+	blocksDelete,
+	deleteRefusalMessage,
+	findLosingAgents,
+	isNameTaken,
+	losingAgentsMessage,
+	nextFreeName,
+	type VisibleProjects,
+} from './skill.policy';
 import { SkillUsageProxy } from './skill-usage-proxy.service';
 import {
 	SkillsTelemetry,
@@ -97,11 +110,6 @@ function assertHasInstructions(skill: AgentSkill): void {
 	}
 }
 
-/** How a refusal counts the agents in projects the user may not read. */
-function agentsInOtherProjects(count: number): string {
-	return `${count} ${count === 1 ? 'agent' : 'agents'} in other projects`;
-}
-
 function toVersionSummary(
 	version: Pick<SkillVersion, 'id' | 'version' | 'createdById' | 'createdAt'>,
 	users: Map<string, SkillUserDto>,
@@ -134,6 +142,9 @@ export class SkillService {
 		private readonly skillRuntime: SkillRuntimeService,
 		private readonly skillsTelemetry: SkillsTelemetry,
 		private readonly assistantSkillsFlagGate: AssistantSkillsFlagGate,
+		private readonly syncedFrom: SkillSyncedFromService,
+		private readonly sourceRepository: SkillSourceRepository,
+		private readonly skillSyncFlagGate: SkillSyncFlagGate,
 	) {}
 
 	// ---------------------------------------------------------------- user actions
@@ -199,7 +210,7 @@ export class SkillService {
 		const projectIds = await this.projectScopeService.getProjectIds(user, ['projectSkill:list']);
 		const page = await this.skillRepository.findVisiblePage(
 			{ projectIds: projectIds ?? 'all', agentIds: [] },
-			{ skip, take },
+			{ skip, take, availableToMCP: true },
 		);
 		const rows = await this.skillRepository.findLatestSaved(page.skills.map((skill) => skill.id));
 		return {
@@ -217,6 +228,7 @@ export class SkillService {
 		if (
 			!row ||
 			row.skill.agentId !== null ||
+			!row.skill.availableToMCP ||
 			!(await this.skillAccess.canAccess(user, row.skill, 'read'))
 		) {
 			return null;
@@ -253,13 +265,19 @@ export class SkillService {
 			source,
 			createdById: user.id,
 		};
-		const id = payload.availableToAssistant
-			? await this.txRunner.run({}, async (ctx) => {
-					const createdId = await this.createTrusted(input, ctx);
-					await this.setAssistantAvailability(createdId, true, target, ctx);
-					return createdId;
-				})
-			: await this.createTrusted(input);
+		const id =
+			payload.availableToAssistant || payload.availableToMCP
+				? await this.txRunner.run({}, async (ctx) => {
+						const createdId = await this.createTrusted(input, ctx);
+						if (payload.availableToAssistant) {
+							await this.setAssistantAvailability(createdId, true, target, ctx);
+						}
+						if (payload.availableToMCP) {
+							await this.setMcpAvailability(createdId, true, target, ctx);
+						}
+						return createdId;
+					})
+				: await this.createTrusted(input);
 		await this.skillsTelemetry.created(
 			user.id,
 			[{ id, ...target }],
@@ -286,7 +304,7 @@ export class SkillService {
 			throw new NotFoundError('Skill not found');
 		}
 		const skill = await this.skillAccess.requireAccess(user, skillId, 'update');
-		const { scope, projectId, availableToAssistant, ...update } = payload;
+		const { scope, projectId, availableToAssistant, availableToMCP, ...update } = payload;
 		const target = scope
 			? await this.skillAccess.resolveCreateTarget(user, { scope, projectId })
 			: undefined;
@@ -296,7 +314,7 @@ export class SkillService {
 
 		const checkedSource = moves ? await this.skillAccess.assertCanMove(user, skillId) : undefined;
 
-		if (!moves && availableToAssistant === undefined) {
+		if (!moves && availableToAssistant === undefined && availableToMCP === undefined) {
 			const { followingAgentIds: _following, ...saved } = await this.saveTrusted(
 				skillId,
 				update,
@@ -323,6 +341,9 @@ export class SkillService {
 			}
 			if (availableToAssistant !== undefined) {
 				await this.setAssistantAvailability(skillId, availableToAssistant, target ?? skill, ctx);
+			}
+			if (availableToMCP !== undefined) {
+				await this.setMcpAvailability(skillId, availableToMCP, target ?? skill, ctx);
 			}
 			return await this.saveTrusted(skillId, update, user.id, ctx);
 		});
@@ -385,7 +406,8 @@ export class SkillService {
 	/**
 	 * Creates a skill with its v1. Returns the new id. `checkNameTaken` is for a name that a
 	 * user or the builder chose. A copy of an agent skill for a new agent keeps the name of
-	 * the skill it copies, so it skips the check.
+	 * the skill it copies, so it skips the check. `frontmatter` holds the SKILL.md keys
+	 * other than name and description, stored as given.
 	 */
 	async createTrusted(
 		input: {
@@ -396,6 +418,8 @@ export class SkillService {
 			createdById: string;
 			checkNameTaken?: boolean;
 			frontmatter?: SkillFrontmatter | null;
+			/** For a synced skill: the source revision of the content, such as a commit SHA. */
+			sourceRevision?: string | null;
 		},
 		ctx: OperationContext = {},
 	): Promise<string> {
@@ -406,7 +430,13 @@ export class SkillService {
 		}
 		const id = input.id ?? `skill_${generateNanoId()}`;
 		await this.skillRepository.createSkill(
-			{ id, target: input.target, source: input.source, createdById: input.createdById },
+			{
+				id,
+				target: input.target,
+				source: input.source,
+				createdById: input.createdById,
+				...(input.sourceRevision ? { sourceRevision: input.sourceRevision } : {}),
+			},
 			toSkillContent(skill, input.frontmatter ?? null),
 			ctx,
 		);
@@ -423,13 +453,16 @@ export class SkillService {
 	 *
 	 * When `ctx` has a transaction, the caller calls `refreshFollowingAgents` after its
 	 * commit. `pushRef` is the tab that saved: it gets no reload push.
+	 *
+	 * The content of a synced skill changes only with `allowSynced`. Only Skill Sync passes
+	 * it, with content that it fetched from the source and the user accepted.
 	 */
 	async saveTrusted(
 		skillId: string,
 		update: SkillUpdate,
 		userId: string,
 		ctx: OperationContext = {},
-		pushRef?: string,
+		{ pushRef, allowSynced = false }: { pushRef?: string; allowSynced?: boolean } = {},
 	): Promise<SkillSaveResult> {
 		const { saved, following } = await this.txRunner.run(ctx, async (txCtx) => {
 			await this.skillRepository.lockForEdit([skillId], txCtx);
@@ -463,6 +496,11 @@ export class SkillService {
 				const unchanged = { versionId: latest.version.id, version: latest.version.version };
 				const result = { ...unchanged, created: false, skill: current, followingAgentIds: [] };
 				return { saved: result, following: [] };
+			}
+			// Only Skill Sync changes the content of a synced skill: a skill with a link. A save
+			// with unchanged content passes above, so a synced skill still accepts a no-op save.
+			if (!allowSynced && (await this.sourceRepository.isLinked(skillId, txCtx))) {
+				throw new SkillSyncedError(latest.version.name, sourceLabelOf(latest.skill.source));
 			}
 			await this.assertCanRename(skillId, latest.skill, latest.version.name, skill.name, txCtx);
 			const version = await this.skillRepository.nextVersionNumber(skillId, txCtx);
@@ -516,14 +554,23 @@ export class SkillService {
 					);
 				}
 			}
+			const name =
+				nameAfterMove ??
+				(await this.skillRepository.findLatestSummaries([skillId], txCtx)).get(skillId)?.name;
+			// All skills of a source share its scope, so a synced skill moves only with its source.
+			if (await this.sourceRepository.isLinked(skillId, txCtx)) {
+				const [skill] = await this.skillRepository.findByIds([skillId], txCtx);
+				throw new SkillSyncedError(
+					name ?? skillId,
+					sourceLabelOf(skill?.source ?? 'github'),
+					'move',
+				);
+			}
 			const others = (await this.skillUsage.findUsingAgentIds(skillId, txCtx)).filter(
 				(id) => id !== keepAgentId,
 			);
 			await this.assertAgentsKeepAccess(others, target, agentProjectIds, txCtx);
 			// The new scope must not already hold a name like the one the skill has after the move.
-			const name =
-				nameAfterMove ??
-				(await this.skillRepository.findLatestSummaries([skillId], txCtx)).get(skillId)?.name;
 			if (name) await this.assertNameFree(name, target, skillId, txCtx);
 			await this.skillRepository.updateTarget(skillId, target, txCtx);
 		});
@@ -536,12 +583,7 @@ export class SkillService {
 		ctx: OperationContext = {},
 	): Promise<void> {
 		await this.txRunner.run(ctx, async (txCtx) => {
-			await this.skillRepository.lockForEdit([skillId], txCtx);
-			const [skill] = await this.skillRepository.findByIds([skillId], txCtx);
-			if (!skill) throw new NotFoundError('Skill not found');
-			if (skill.projectId !== checkedTarget.projectId || skill.agentId !== checkedTarget.agentId) {
-				throw new ConflictError('The skill scope changed. Reload the skill and try again.');
-			}
+			const skill = await this.lockInCheckedTarget(skillId, checkedTarget, txCtx);
 			if (available && skill.agentId !== null) {
 				throw new UserError(
 					"The n8n Assistant can't use skills scoped to an agent. Move the skill to a project or the instance first.",
@@ -549,6 +591,37 @@ export class SkillService {
 			}
 			await this.skillRepository.setAssistantAvailability(skillId, available, txCtx);
 		});
+	}
+
+	async setMcpAvailability(
+		skillId: string,
+		available: boolean,
+		checkedTarget: SkillTarget,
+		ctx: OperationContext = {},
+	): Promise<void> {
+		await this.txRunner.run(ctx, async (txCtx) => {
+			const skill = await this.lockInCheckedTarget(skillId, checkedTarget, txCtx);
+			if (available && skill.agentId !== null) {
+				throw new UserError(
+					"MCP clients can't get skills scoped to an agent. Move the skill to a project or the instance first.",
+				);
+			}
+			await this.skillRepository.updateAvailableToMCP(skillId, available, txCtx);
+		});
+	}
+
+	private async lockInCheckedTarget(
+		skillId: string,
+		checkedTarget: SkillTarget,
+		ctx: OperationContext,
+	): Promise<Skill> {
+		await this.skillRepository.lockForEdit([skillId], ctx);
+		const [skill] = await this.skillRepository.findByIds([skillId], ctx);
+		if (!skill) throw new NotFoundError('Skill not found');
+		if (skill.projectId !== checkedTarget.projectId || skill.agentId !== checkedTarget.agentId) {
+			throw new ConflictError('The skill scope changed. Reload the skill and try again.');
+		}
+		return skill;
 	}
 
 	/**
@@ -580,26 +653,13 @@ export class SkillService {
 
 	// ---------------------------------------------------------------- rules
 
-	/**
-	 * The requested name if its scope has no name like it, else the name with the first
-	 * free number after it ("New skill 2"), as workflow names get.
-	 */
+	/** A free name in the scope of `target`. The rule is `nextFreeName`. */
 	private async freeName(requested: string, target: SkillTarget, ctx: OperationContext = {}) {
-		const taken = new Set(
-			(
-				await this.skillRepository.findLatestNamesInTarget(
-					{ projectId: target.projectId, agentId: target.agentId },
-					ctx,
-				)
-			).map(({ name }) => skillNameKey(name)),
+		const names = await this.skillRepository.findLatestNamesInTarget(
+			{ projectId: target.projectId, agentId: target.agentId },
+			ctx,
 		);
-		const base = requested.trim();
-		if (!taken.has(skillNameKey(base))) return base;
-		for (let n = 2; ; n++) {
-			const suffix = ` ${n}`;
-			const candidate = `${base.slice(0, AGENT_SKILL_NAME_MAX_LENGTH - suffix.length)}${suffix}`;
-			if (!taken.has(skillNameKey(candidate))) return candidate;
-		}
+		return nextFreeName(requested, new Set(names.map(({ name }) => skillNameKey(name))));
 	}
 
 	/**
@@ -636,56 +696,36 @@ export class SkillService {
 		await this.skillUsage.assertRenameKeepsNamesApart(skillId, oldName, newName, ctx);
 	}
 
-	/** Whether another skill in the scope has a name that is hard to tell apart from `name`. */
+	/**
+	 * Whether another skill in the scope has a name that is hard to tell apart from `name`.
+	 * The rule is `isNameTaken`.
+	 */
 	async isNameTaken(
 		name: string,
 		target: SkillTarget,
 		exceptSkillId: string | undefined,
 		ctx: OperationContext = {},
 	): Promise<boolean> {
-		const key = skillNameKey(name);
 		const names = await this.skillRepository.findLatestNamesInTarget(
 			{ projectId: target.projectId, agentId: target.agentId },
 			ctx,
 		);
-		return names.some(
-			(other) => other.skillId !== exceptSkillId && skillNameKey(other.name) === key,
-		);
+		return isNameTaken(name, names, exceptSkillId);
 	}
 
-	/**
-	 * Refuses a move that takes the skill away from one of `agentIds`. An agent can add an
-	 * instance skill, a skill of its own project and its own agent skills.
-	 */
+	/** Refuses a move that takes the skill away from one of `agentIds`. The rule is `findLosingAgents`. */
 	private async assertAgentsKeepAccess(
 		agentIds: string[],
 		target: SkillTarget,
-		agentProjectIds: string[] | 'all',
+		agentProjectIds: VisibleProjects,
 		ctx: OperationContext,
 	): Promise<void> {
 		if (agentIds.length === 0 || (target.projectId === null && target.agentId === null)) return;
 		const agents = await this.skillUsage.findAgents(agentIds, ctx);
-		const losing = agentIds.filter((id) =>
-			target.agentId ? id !== target.agentId : agents.get(id)?.projectId !== target.projectId,
-		);
-		if (losing.length === 0) return;
-		const named: string[] = [];
-		let hidden = 0;
-		for (const id of losing) {
-			const agent = agents.get(id);
-			if (agent && (agentProjectIds === 'all' || agentProjectIds.includes(agent.projectId))) {
-				named.push(`"${agent.name}"`);
-			} else {
-				hidden++;
-			}
+		const losing = findLosingAgents(agentIds, target, agents);
+		if (losing.length > 0) {
+			throw new ConflictError(losingAgentsMessage(losing, agents, agentProjectIds));
 		}
-		if (hidden > 0) named.push(agentsInOtherProjects(hidden));
-		const one = losing.length === 1;
-		throw new ConflictError(
-			`${named.join(', ')} would lose access to this skill. Choose a scope that includes ${
-				one ? 'that agent' : 'those agents'
-			}, or detach the skill from ${one ? 'it' : 'them'} first.`,
-		);
 	}
 
 	/**
@@ -694,7 +734,7 @@ export class SkillService {
 	 */
 	private async deleteSkill(
 		skillId: string,
-		agentProjectIds: string[] | 'all',
+		agentProjectIds: VisibleProjects,
 		ctx: OperationContext = {},
 	): Promise<void> {
 		await this.txRunner.run(ctx, async (txCtx) => {
@@ -702,20 +742,10 @@ export class SkillService {
 			if (!skill) throw new NotFoundError('Skill not found');
 			await this.skillRepository.lockForEdit([skillId], txCtx);
 			const usage = await this.skillUsage.findUsage(skillId, agentProjectIds, txCtx);
-			if (usage.drafts.length > 0 || usage.pins.length > 0 || usage.hiddenAgents > 0) {
+			if (blocksDelete(usage)) {
 				const name =
 					(await this.skillRuntime.latestNames([skillId], txCtx)).get(skillId) ?? skillId;
-				const users = [
-					...usage.drafts.map((draft) => `${draft.agentName} (draft)`),
-					...usage.pins.map(
-						(pin) =>
-							`${pin.agentName} (${pin.version === null ? 'older published version' : `published v${pin.version}`})`,
-					),
-				];
-				if (usage.hiddenAgents > 0) users.push(agentsInOtherProjects(usage.hiddenAgents));
-				throw new ConflictError(
-					`Skill "${name}" is used by ${[...new Set(users)].join(', ')} and cannot be deleted.`,
-				);
+				throw new ConflictError(deleteRefusalMessage(name, usage));
 			}
 			await this.skillRepository.deleteSkill(skillId, txCtx);
 		});
@@ -731,6 +761,10 @@ export class SkillService {
 		const content = toAgentSkill(latest);
 		// Any user can read an instance skill, so "used by" only names the agents they can read.
 		const agentProjectIds = await this.projectScopeService.getProjectIds(user, ['agent:read']);
+		const [usedBy, syncedFrom] = await Promise.all([
+			this.skillUsage.findUsage(skill.id, agentProjectIds ?? 'all'),
+			this.syncedFrom.of(user, skill.id),
+		]);
 		return {
 			...item,
 			// Name, description and number from the same row as the content, so a save that
@@ -740,7 +774,8 @@ export class SkillService {
 			latestVersion: latest.version.version,
 			skill: content,
 			skillHash: getSkillHash(content),
-			usedBy: await this.skillUsage.findUsage(skill.id, agentProjectIds ?? 'all'),
+			usedBy,
+			syncedFrom,
 		};
 	}
 
@@ -791,14 +826,17 @@ export class SkillService {
 		);
 		const projectOf = (skill: Skill) =>
 			skill.projectId ?? (skill.agentId ? (agents.get(skill.agentId)?.projectId ?? null) : null);
-		const [latest, usage, projects, creators, canEdit, canDelete] = await Promise.all([
-			this.skillRepository.findLatestSummaries(ids),
-			this.skillUsage.countUsingAgents(ids),
-			this.skillRepository.findProjects(skills.flatMap((skill) => projectOf(skill) ?? [])),
-			this.findCreators(skills.flatMap((skill) => skill.createdById ?? [])),
-			this.skillAccess.accessCheck(user, 'update'),
-			this.skillAccess.accessCheck(user, 'delete'),
-		]);
+		const [latest, usage, projects, creators, canEdit, canDelete, synced, skillSyncOn] =
+			await Promise.all([
+				this.skillRepository.findLatestSummaries(ids),
+				this.skillUsage.countUsingAgents(ids),
+				this.skillRepository.findProjects(skills.flatMap((skill) => projectOf(skill) ?? [])),
+				this.findCreators(skills.flatMap((skill) => skill.createdById ?? [])),
+				this.skillAccess.accessCheck(user, 'update'),
+				this.skillAccess.accessCheck(user, 'delete'),
+				this.sourceRepository.findLinkedSkillIds(ids),
+				this.skillSyncFlagGate.isEnabled(user),
+			]);
 		const items: SkillListItem[] = [];
 		for (const skill of skills) {
 			const summary = latest.get(skill.id);
@@ -819,8 +857,13 @@ export class SkillService {
 				latestVersion: summary.version,
 				usedByAgents: usage.get(skill.id) ?? 0,
 				availableToAssistant: skill.availableToAssistant,
-				canEdit: canEdit(skill, projectId),
+				availableToMCP: skill.availableToMCP,
+				// The source holds the content of a synced skill, so n8n cannot edit it.
+				canEdit: canEdit(skill, projectId) && !synced.has(skill.id),
 				canDelete: canDelete(skill, projectId),
+				// Stop syncing needs the update permission of the scope that the skill shares with its source.
+				// The route answers 404 while the Skill Sync flag is off for the user.
+				canStopSyncing: skillSyncOn && synced.has(skill.id) && canEdit(skill, projectId),
 				createdAt: skill.createdAt.toISOString(),
 				updatedAt: skill.updatedAt.toISOString(),
 			});
@@ -845,4 +888,9 @@ export class SkillService {
 			]),
 		);
 	}
+}
+
+/** How a message names the source of a synced skill, such as GitHub. */
+function sourceLabelOf(source: SkillSource): string {
+	return syncedSourceLabel(source) ?? 'its source';
 }
