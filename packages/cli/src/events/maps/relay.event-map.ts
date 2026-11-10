@@ -591,6 +591,31 @@ export type RelayEventMap = ModuleEventMap & {
 		projectId: string | undefined;
 	};
 
+	/** A user retrieved the decrypted data of a credential through `includeData=true`. */
+	'credentials-data-read': {
+		user: UserLike;
+		credentialType: string;
+		credentialId: string;
+		publicApi: boolean;
+	};
+
+	/**
+	 * A user retrieved the decrypted data of several credentials at once through
+	 * `includeData=true` on the list. One event per chunk of ids, so that every id is
+	 * recorded and every event stays small.
+	 */
+	'credentials-list-data-read': {
+		user: UserLike;
+		/** Ids of the credentials whose data was returned, this chunk only. */
+		credentialIds: string[];
+		/** Number of credentials whose data was returned, across all chunks. */
+		credentialCount: number;
+		/** 1-based index of this chunk. */
+		chunk: number;
+		chunkCount: number;
+		publicApi: boolean;
+	};
+
 	'credentials-user-disconnected': {
 		user: UserLike;
 		credentialType: string;
@@ -1511,6 +1536,8 @@ export type RelayEventMap = ModuleEventMap & {
 		};
 		/** Project scope only. */
 		selectedWorkflowCount?: number;
+		/** Project scope only. */
+		selectedFolderCount?: number;
 		/** Set when the outcome is not 'failed'. */
 		openedReview?: boolean;
 	};
@@ -1527,6 +1554,10 @@ export type RelayEventMap = ModuleEventMap & {
 		workflowsChanged?: number;
 		/** Set when the outcome is 'applied'. */
 		workflowsFailedToPublish?: number;
+		/** Set when the outcome is 'applied'. */
+		foldersChanged?: number;
+		/** Set when the outcome is 'applied'. */
+		projectsChanged?: number;
 	};
 
 	'promotion-merge-request-opened': {
