@@ -3205,12 +3205,12 @@ export class Github implements INodeType {
 				} else if (resource === 'notification') {
 					if (operation === 'get') {
 					  requestMethod = 'GET';
-					  endpoint = `/notifications`;
+					  endpoint = requestPath`/notifications`;
 
 					} else if (operation === 'markAsRead') {
 					  const threadId = this.getNodeParameter('threadid', i, '') as string;
 					  requestMethod = 'PATCH';
-					  endpoint = `/notifications/threads/${threadId}`;
+					  endpoint = requestPath`/notifications/threads/${threadId}`;
 					  body = {};
 					}
 				} else {

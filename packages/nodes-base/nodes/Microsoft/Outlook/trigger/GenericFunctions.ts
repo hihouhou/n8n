@@ -200,7 +200,7 @@ export async function getPollResponse(
 					const rawContent = await microsoftApiRequest.call(
 						this,
 						'GET',
-						`/messages/${messageId}/$value`,
+						requestPath`/messages/${messageId}/$value`,
 						0,
 						undefined,
 						{},

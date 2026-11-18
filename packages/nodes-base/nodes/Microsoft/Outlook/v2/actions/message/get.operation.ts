@@ -180,7 +180,7 @@ export async function execute(this: IExecuteFunctions, index: number) {
 		const rawContent = await microsoftApiRequest.call(
 			this,
 			'GET',
-			`/messages/${messageId}/$value`,
+			requestPath`/messages/${messageId}/$value`,
 			index,
 			undefined,
 			{},
