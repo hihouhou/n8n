@@ -2,8 +2,8 @@ import type { ModuleRegistry } from '@n8n/backend-common';
 import type { User } from '@n8n/db';
 import { mock } from 'vitest-mock-extended';
 
-import type { DataTable } from '@/modules/data-table/data-table.entity';
-import type { DataTableService } from '@/modules/data-table/data-table.service';
+import { type DataTable, type DataTableService } from '@n8n/backend-module-data-table';
+
 import { userHasScopes } from '@/permissions.ee/check-access';
 
 import { DataTableImporter } from '../data-table-importer';
@@ -20,6 +20,7 @@ const context: ImportContext = {
 	user: mock<User>({ id: 'user-1' }),
 	projectId: 'project-1',
 	folderId: null,
+	publicApi: false,
 };
 
 function makeImporter() {
@@ -55,7 +56,14 @@ describe('DataTableImporter.plan', () => {
 
 		const plan = await importer.plan(context, makeRequest({ requirements: undefined }));
 
-		expect(plan).toEqual({ creations: [], updates: [], failures: [], matchedCount: 0 });
+		expect(plan).toEqual({
+			creations: [],
+			updates: [],
+			columnAlignments: [],
+			matched: [],
+			failures: [],
+			matchedCount: 0,
+		});
 		expect(moduleRegistry.isActive).not.toHaveBeenCalled();
 	});
 
@@ -88,7 +96,14 @@ describe('DataTableImporter.plan', () => {
 
 		const plan = await importer.plan(context, makeRequest({ missingMode: 'do-nothing' }));
 
-		expect(plan).toEqual({ creations: [], updates: [], failures: [], matchedCount: 0 });
+		expect(plan).toEqual({
+			creations: [],
+			updates: [],
+			columnAlignments: [],
+			matched: [],
+			failures: [],
+			matchedCount: 0,
+		});
 		expect(userHasScopesMock).not.toHaveBeenCalled();
 	});
 

@@ -434,6 +434,10 @@ function onWrapperPointerDown(event: PointerEvent) {
 		@mouseleave="onGroupMouseLeave"
 	>
 		<div :class="$style.titleBar">
+			<span
+				v-if="isCollapsed && (executionStatus === 'running' || executionStatus === 'waiting')"
+				:class="$style.statusRing"
+			/>
 			<Handle
 				:id="CANVAS_NODE_GROUP_INPUT_HANDLE"
 				type="target"
@@ -474,7 +478,7 @@ function onWrapperPointerDown(event: PointerEvent) {
 							class="nodrag"
 							variant="ghost"
 							size="small"
-							icon="ungroup"
+							icon="node-ungroup"
 							:aria-label="i18n.baseText('canvas.selection.toolbar.ungroup')"
 							data-test-id="canvas-node-group-ungroup"
 							@click.stop="onUngroupClick"
@@ -489,7 +493,7 @@ function onWrapperPointerDown(event: PointerEvent) {
 							class="nodrag"
 							variant="ghost"
 							size="small"
-							icon="workflow"
+							icon="node-extract"
 							:aria-label="extractLabel"
 							data-test-id="canvas-node-group-extract"
 							@click.stop="onExtractClick"
@@ -503,7 +507,7 @@ function onWrapperPointerDown(event: PointerEvent) {
 							class="nodrag"
 							variant="ghost"
 							size="small"
-							icon="sparkles"
+							icon="node-sparkle"
 							:aria-label="i18n.baseText('canvas.nodeGroup.addToChat')"
 							data-test-id="canvas-node-group-add-to-chat"
 							@click.stop="onAddToChatClick"
@@ -806,21 +810,18 @@ function onWrapperPointerDown(event: PointerEvent) {
 	@include styles.canvas-node-border(dashed);
 }
 
-/* stylelint-disable */
-.wrapper.collapsed.running .titleBar::after,
-.wrapper.collapsed.waiting .titleBar::after {
-	@include styles.status-animated-after;
+.statusRing {
+	@include styles.status-animated-ring;
 	border-radius: var(--radius--lg);
 }
-.wrapper.collapsed.running .titleBar::after {
+.wrapper.running .statusRing {
 	@include styles.status-running-animation;
 }
-.wrapper.collapsed.waiting .titleBar::after {
+.wrapper.waiting .statusRing {
 	@include styles.status-waiting-animation;
 }
 
 @include styles.status-animation-definitions;
-/* stylelint-enable */
 
 .content {
 	display: flex;

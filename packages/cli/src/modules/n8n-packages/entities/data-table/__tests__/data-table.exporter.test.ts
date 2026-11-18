@@ -3,8 +3,7 @@ import type { User } from '@n8n/db';
 import { jsonParse } from 'n8n-workflow';
 import { mock } from 'vitest-mock-extended';
 
-import type { DataTable } from '@/modules/data-table/data-table.entity';
-import type { DataTableService } from '@/modules/data-table/data-table.service';
+import { type DataTable, type DataTableService } from '@n8n/backend-module-data-table';
 
 import { CapturingWriter } from '../../../io/__tests__/utils/capturing-writer';
 import { DataTableExporter } from '../data-table.exporter';
@@ -18,7 +17,7 @@ function makeDataTable(overrides: Partial<DataTable> = {}): DataTable {
 		id: 'dt1',
 		name: 'Customers',
 		projectId: 'proj-1',
-		columns: [{ id: 'col-1', name: 'email', type: 'string', index: 0 }],
+		columns: [{ id: 'col1', name: 'email', type: 'string', index: 0 }],
 		createdAt: new Date(),
 		updatedAt: new Date(),
 		...overrides,
@@ -134,7 +133,7 @@ describe('DataTableExporter', () => {
 			expect(parsed).toEqual({
 				id: 'dt1',
 				name: 'Customers',
-				columns: [{ name: 'email', type: 'string', index: 0 }],
+				columns: [{ id: 'col1', name: 'email', type: 'string', index: 0 }],
 			});
 		});
 

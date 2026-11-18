@@ -10,12 +10,14 @@ import {
 import type { Project, User, WorkflowEntity } from '@n8n/db';
 import { Container } from '@n8n/di';
 import type { ApiKeyScope } from '@n8n/permissions';
+import { DataSource } from '@n8n/typeorm';
 import { InstanceSettings } from 'n8n-core';
 import { jsonParse } from 'n8n-workflow';
 import type { Readable } from 'node:stream';
 
 import type { Agent } from '@/modules/agents/entities/agent.entity';
 import { AgentHistoryRepository } from '@/modules/agents/repositories/agent-history.repository';
+import { AgentHistory } from '@/modules/agents/entities/agent-history.entity';
 import { AgentTaskRepository } from '@/modules/agents/repositories/agent-task.repository';
 import { AgentRepository } from '@/modules/agents/repositories/agent.repository';
 import { looseAgentsFixture } from '@/modules/n8n-packages/__tests__/fixtures/agent-package-fixtures';
@@ -30,13 +32,17 @@ import { TarPackageReader } from '@/modules/n8n-packages/io/tar/tar-package-read
 import { PackageImportConfig } from '@/modules/n8n-packages/n8n-packages.config';
 import type { ExportPackageEventCounts } from '@/modules/n8n-packages/n8n-packages.types';
 import { serializedAgentSchema } from '@/modules/n8n-packages/spec/serialized/agent.schema';
+import { serializedSkillSchema } from '@/modules/n8n-packages/spec/serialized/skill.schema';
 import { createFolder } from '@test-integration/db/folders';
 import { createCustomRoleWithScopeSlugs } from '@test-integration/db/roles';
 import { createMemberWithApiKey, createOwnerWithApiKey } from '@test-integration/db/users';
 import { createProjectVariable } from '@test-integration/db/variables';
 import { setupTestServer } from '@test-integration/utils';
+import { storedAgentConfig } from '@/modules/agents/__tests__/test-utils/stored-agent-config';
+import { AgentSkillRepository } from '@/modules/agents/repositories/agent-skill.repository';
+import { createSkill, deleteAllSkills, toSkillContent } from '@/modules/skills/testing';
 
-beforeAll(async () => await testModules.loadModules(['n8n-packages', 'agents']));
+beforeAll(async () => await testModules.loadModules(['n8n-packages', 'skills', 'agents']));
 const server = setupTestServer({ endpointGroups: ['publicApi'] });
 let owner: User;
 let project: Project;
@@ -46,7 +52,7 @@ let dependency: Agent;
 let workflow: WorkflowEntity;
 let repository: AgentRepository;
 
-beforeAll(() => {
+beforeAll(async () => {
 	repository = Container.get(AgentRepository);
 	Container.get(InstanceSettings).markAsLeader();
 });
@@ -59,7 +65,9 @@ beforeEach(async () => {
 		id: 'support_source',
 		name: 'Support',
 		projectId: project.id,
-		schema: AgentJsonConfigSchema.parse({ name: 'Support', model: '', instructions: '' }),
+		schema: storedAgentConfig(
+			AgentJsonConfigSchema.parse({ name: 'Support', model: '', instructions: '' }),
+		),
 		versionId: 'draft-version',
 	});
 	dependency = await repository.save({
@@ -74,8 +82,9 @@ beforeEach(async () => {
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await repository.delete({});
-	await Container.get(AgentHistoryRepository).delete({});
+	await Container.get(DataSource).getRepository(AgentHistory).delete({});
 	await Container.get(AgentTaskRepository).delete({});
+	await deleteAllSkills();
 	await testDb.truncate([
 		'WorkflowEntity',
 		'WorkflowHistory',
@@ -90,14 +99,16 @@ afterEach(async () => {
 async function addReferences() {
 	await repository.save({
 		id: agent.id,
-		schema: AgentJsonConfigSchema.parse({
-			...agent.schema,
-			subAgents: { agents: [{ agentId: dependency.id, enabled: false }] },
-			tools: [
-				...(agent.schema?.tools ?? []),
-				{ type: 'workflow', workflowId: workflow.id, workflow: 'Display only', enabled: false },
-			],
-		}),
+		schema: storedAgentConfig(
+			AgentJsonConfigSchema.parse({
+				...agent.schema,
+				subAgents: { agents: [{ agentId: dependency.id, enabled: false }] },
+				tools: [
+					...(agent.schema?.tools ?? []),
+					{ type: 'workflow', workflowId: workflow.id, workflow: 'Display only', enabled: false },
+				],
+			}),
+		),
 	});
 }
 
@@ -123,10 +134,26 @@ async function download(body: Partial<ExportPackageRequestDto>, user = owner) {
 }
 
 it('downloads an Agent with its skills, tools, tasks, and dependencies', async () => {
+	const fixture = looseAgentsFixture();
 	const { config, tasks, ...content } = serializedAgentSchema.parse(
-		looseAgentsFixture().files['agents/support/agent.json'],
+		fixture.files['agents/support/agent.json'],
 	);
-	agent = await repository.save({ ...agent, ...content, schema: config });
+	agent = await repository.save({
+		...agent,
+		...content,
+		schema: config && storedAgentConfig(config),
+	});
+	const {
+		id: skillId,
+		skill,
+		frontmatter,
+	} = serializedSkillSchema.parse(fixture.files['skills/support_source_skill/skill.json']);
+	await createSkill({
+		id: skillId,
+		projectId: project.id,
+		content: toSkillContent(skill, frontmatter),
+	});
+	await Container.get(AgentSkillRepository).replaceDependencies(agent.id, [{ skillId }]);
 	await Container.get(AgentTaskRepository).save(
 		Object.entries(tasks).map(([id, task]) => ({ id, agentId: agent.id, ...task })),
 	);
@@ -151,11 +178,14 @@ it('downloads an Agent with its skills, tools, tasks, and dependencies', async (
 	expect(parsed).toMatchObject({
 		sourceAgentId: agent.id,
 		availableInMCP: true,
-		config: { skills: [{ enabled: false }], tasks: [{ enabled: false }] },
-		skills: content.skills,
+		config: { skills: [{ type: 'skill', id: skillId }], tasks: [{ enabled: false }] },
 		tools: content.tools,
 		tasks: { [`${agent.id}_task`]: { cronExpression: '0 9 * * *', timezone: null } },
 	});
+	expect(manifest.skills?.map(({ id }) => id)).toEqual([skillId]);
+	expect(await Container.get(N8nPackageParser).getSkills(reader)).toEqual([
+		{ id: skillId, scope: 'project', skill, frontmatter },
+	]);
 });
 
 it.each(['mixed', 'project'] as const)('downloads a %s selection', async (selection) => {
@@ -225,14 +255,16 @@ it.each(['published-strict', 'ignore-unpublished'] as const)(
 			instructions: '',
 			tools: [{ type: 'workflow', workflowId: versionedWorkflow.id, workflow: 'Published tool' }],
 		});
-		await Container.get(AgentHistoryRepository).saveVersion({
-			agentId: agent.id,
-			versionId: 'published-version',
-			publishedBy: 'Package test',
-			schema,
-			skills: {},
-			tools: {},
-		});
+		await Container.get(AgentHistoryRepository).saveVersion(
+			{
+				agentId: agent.id,
+				versionId: 'published-version',
+				publishedBy: 'Package test',
+				schema: storedAgentConfig(schema),
+				tools: {},
+			},
+			{},
+		);
 		await repository.update(agent.id, { activeVersionId: 'published-version' });
 		const selection =
 			versionPolicy === 'ignore-unpublished'
@@ -308,21 +340,23 @@ it('requires variable:list only when Agent variable values are included', async 
 	await createProjectVariable('REGION', 'source-project', project);
 	await repository.save({
 		id: agent.id,
-		schema: AgentJsonConfigSchema.parse({
-			...agent.schema,
-			tools: [
-				{
-					type: 'node',
-					name: 'Fetch',
-					enabled: false,
-					node: {
-						nodeType: 'n8n-nodes-base.httpRequest',
-						nodeTypeVersion: 4,
-						nodeParameters: { url: '={{ $vars.REGION }}' },
+		schema: storedAgentConfig(
+			AgentJsonConfigSchema.parse({
+				...agent.schema,
+				tools: [
+					{
+						type: 'node',
+						name: 'Fetch',
+						enabled: false,
+						node: {
+							nodeType: 'n8n-nodes-base.httpRequest',
+							nodeTypeVersion: 4,
+							nodeParameters: { url: '={{ $vars.REGION }}' },
+						},
 					},
-				},
-			],
-		}),
+				],
+			}),
+		),
 	});
 	const caller = await createOwnerWithApiKey({ scopes: ['agent:export'] });
 	const response = await server
